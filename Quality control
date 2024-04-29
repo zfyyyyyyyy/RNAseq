@@ -1,0 +1,90 @@
+# 使用vi编辑器创建或打开文件SRRaccession_List.txt，并输入要分析的SSR号
+vi SRRaccession_List.txt
+
+# 使用prefetch命令下载SRR列表中指定的.sra原始数据，并将它们保存在当前目录下
+prefetch -O . --option-file SRRaccession_List.txt
+
+# 开始一个循环，处理当前目录内每个以SRR开头的文件夹
+for folder in SRR*/; do
+    # 切换到当前的SRR文件夹内
+    cd "$folder"
+    # 获取当前文件夹的名称，这个名称将用作后续操作的前缀
+    prefix=$(basename "$folder")
+    # 执行fastq-dump命令，将.sra文件转换为fastq格式，并将输出文件放置在上级目录的fastq文件夹中
+    fastq-dump --split-files -O ../fastq "$prefix".sra
+    # 完成当前文件夹的处理后，切换回上级目录
+    cd ..
+done
+
+# 使用pigz命令压缩当前目录下所有的fastq文件
+pigz -p 4 *.fastq
+
+# 对所有fastq.gz文件进行MD5校验，并将结果保存到md5.txt文件中
+md5sum *gz > md5.txt
+cat md5.txt
+# 验证md5.txt中记录的MD5值与实际文件的MD5值是否一致
+md5sum -c md5.txt
+
+# 对所有fastq.gz文件运行fastqc程序进行数据质量控制
+fastqc SRR*gz
+
+# 使用multiqc工具整合fastqc的结果，并在当前目录下生成一个统一的报告
+multiqc ./
+
+# 使用trimmomatic软件对fastq文件显示的前10个低质量碱基进行去除并对其余序列进行质控
+a=10272601
+for i in {2..7}; do
+    trimmomatic PE \
+    SRR${a}_1.fastq.gz \
+    SRR${a}_2.fastq.gz \
+    ../02clean_data/SRR${a}_paired_R1.fastq.gz \
+    ../02clean_data/SRR${a}_unpaired_R1.fastq.gz \
+    ../02clean_data/SRR${a}_paired_R2.fastq.gz \
+    ../02clean_data/SRR${a}_unpaired_R2.fastq.gz \
+    HEADCROP:10 \
+    LEADING:3 TRAILING:3 \
+    SLIDINGWINDOW:5:20 MINLEN:50 -phred33
+    a=$((a+1))
+done
+
+# 使用STAR软件建立基因组索引文件
+STAR --runThreadN 4 \
+--runMode genomeGenerate \
+--genomeDir arab_STAR_genome \
+--genomeFastaFiles 00ref/NIP-T2T.fa \
+--sjdbGTFfile 00ref/NIP-T2T.gtf \
+--sjdbOverhang 149
+
+# 对一系列clean_data中的fastq文件进行比对，并输出到BAM文件
+for a in {10272602..10272607}; do
+    STAR --runThreadN 4 --genomeDir arab_STAR_genome \
+    --readFilesCommand zcat \
+    --readFilesIn 02clean_data/SRR${a}_paired_R1.fastq.gz 02clean_data/SRR${a}_paired_R2.fastq.gz \
+    --outFileNamePrefix 03align_out/${a}_ \
+    --outSAMtype BAM SortedByCoordinate \
+    --outBAMsortingThreadN 4 \
+    --quantMode TranscriptomeSAM GeneCounts
+done
+
+# 使用RSEM准备参考基因组索引
+rsem-prepare-reference \
+--gtf 00ref/NIP-T2T.gtf \
+00ref/NIP-T2T.fa \
+arab_RSEM/arab_rsem
+
+# 对clean_data中的fastq文件计算表达量
+for i in {10272606..10272607}; do
+    rsem-calculate-expression \
+    --paired-end \
+    --no-bam-output \
+    --alignments -p 4 \
+    -q 03align_out/${i}_Aligned.toTranscriptome.out.bam \
+    arab_RSEM/arab_rsem \
+    04rsem_out/${i}_rsem
+done
+
+# 使用RSEM生成表达矩阵并重定向输出到output.matrix文件
+rsem-generate-data-matrix *_rsem.genes.results > output.matrix
+
+# 使用awk命令处理output.matrix文件，移除所有表达量为0的基因，并保存为DESeq2_input.txt，用于后续的DEG（差异表达基因）分析
+awk 'BEGIN{printf "geneid\ta1\ta2\ta3\tb1\tb2\tb3n"}{if($2+$3+$4+$5>0)print $0}' output.matrix > DESeq2_input.txt
