@@ -1,0 +1,47 @@
+library(reshape2)
+library(ggplot2)
+library(ggridges)
+library(biomaRt)
+library(readxl)
+
+tran_geneid <- read_excel("AGIS2LOC2RAP.xlsx")# 从Excel文件读取基因转换的ID信息
+diff_gene <- read.csv("DEG.csv")# 从CSV文件读取差异表达基因的数据
+colnames(diff_gene)[1] <- "gene"# 将diff_gene数据框的第一列重命名为"gene"
+
+# 将差异表达基因与转基因的基因ID信息进行合，通过"gene"和"AGIS ID"列进行匹配，保留所有的"gene"列的值
+RAP_ID <- merge(diff_gene, tran_geneid[, c("AGIS ID", "RAP ID")], 
+                by.x = "gene", by.y = "AGIS ID", all.x = TRUE)
+locus_ids <- RAP_ID$"RAP ID"# 从合并后的数据框中提取RAP ID
+
+ensembl <- useMart("plants_mart", host="https://plants.ensembl.org")# 使用biomaRt包连接到植物数据库
+dataset_list = as.data.frame(listDatasets(ensembl))# 使用 listDatasets 函数来查看该BioMart实例支持的数据集
+osativa <- useMart("plants_mart", host="https://plants.ensembl.org", dataset = "osativa_eg_gene")# 选择特定的数据集进行查询，这里选择的是水稻的数据集
+
+# 从BioMart获取特定基因的Entrez ID等信息
+entrez_ids <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name", "description", "chromosome_name"), 
+                     filters = "ensembl_gene_id", 
+                     values = locus_ids, 
+                     mart = osativa)
+# 使用dplyr包的distinct函数移除重复的ensembl_gene_id，同时保留其他所有列
+entrez_ids <- dplyr::distinct(entrez_ids, ensembl_gene_id, .keep_all = TRUE)
+
+# 将RAP_ID与entrez_ids进行合并，通过"RAP ID"和"ensembl_gene_id"列进行匹配
+diff_gene <- merge(RAP_ID, entrez_ids[, c('ensembl_gene_id', 'entrezgene_id')], 
+                   by.x = "RAP ID", by.y = "ensembl_gene_id", all.x = TRUE)
+# 使用dplyr包的arrange函数对diff_gene数据框按log2FoldChange降序排列
+data_all_sort <- diff_gene %>% 
+  arrange(desc(log2FoldChange))
+write.csv(data_all_sort, "data_all_sort.csv", row.names = FALSE)# 将排序后的数据导出为CSV文件
+
+data_all_sort <- read.csv("data_all_sort.csv")# 重新读取刚刚导出的CSV文件
+geneList = data_all_sort$log2FoldChange# 从排序后的数据框中提取log2FoldChange列作为基因列表
+names(geneList) <- data_all_sort$entrezgene_id# 将entrezgene_id作为基因列表的名称
+
+
+KEGG_database = "osa"# 指定KEGG数据库的物种代码
+gsea <- gseKEGG(geneList, organism = KEGG_database, pvalueCutoff = 0.05)# 使用clusterProfiler包的gseKEGG函数进行KEGG通路的富集分析
+gsea@result$Description = c('Diterpenoid biosynthesis', 'Biosynthesis of secondary metabolites')# 为gsea对象的结果集更改描述信息
+
+dotplot(gsea, label_format = 100)# 使用dotplot函数绘制富集分析的点图
+ridgeplot(gsea, label_format = 100)# 使用ridgeplot函数绘制富集分析的山脊图
+gseaplot2(gsea, 1:2, pvalue_table = T)# 使用gseaplot2函数绘制富集分析的自定义点图
