@@ -1,0 +1,75 @@
+#DESeq2转录组差异表达分析，参考链接 
+#https://bioconnector.github.io/workshops/r-rnaseq-airway.html
+library(DESeq2)
+library(dplyr)
+library(readxl)
+library(pheatmap)
+
+#数据导入-----------------------------------------------------------------------------
+countData <- read.table(file = "DESeq2_input.txt", header = TRUE, sep = "\t", row.names = 1)# 从文本文件"DESeq2_input.txt"中读取数据
+countData <- as.data.frame(countData)# 将countData转换成数据框（data.frame）
+colnames(countData) <- c("NIL19_6d_3","NIL19_6d_2","NIL19_6d_1","NIL15_6d_3","NIL15_6d_2","NIL15_6d_1")# 为数据框countData的列指定名称
+dim(countData)# 检查countData的维度
+countData <- round(countData)# 将countData中的所有数值四舍五入到最接近的整数，并存储结果回countData
+countData_1 <- countData[rowSums(as.matrix(countData)) != 0, ]# 通过行求和排除那些所有表达量均为0的基因，更新countData_1
+dim(countData_1)# 检查更新后的countData_1的维度
+
+colData <- read_excel("mymeta2.xlsx", sheet = "Sheet1")# 从Excel文件"mymeta2.xlsx"的"Sheet1"工作表中读取数据，并存储在数据框colData中
+colData$condition <- factor(colData$condition, levels = c("highN", "LowN"))# 将colData中的"condition"列转换为因子类型，并且指定因子的水平（level）顺序
+colnames(countData_1) == colData$id# 检查countData_1的列名是否与colData数据框中的id列相匹配
+#DESeq2差异分析---------------------------------------------------------------------
+# 创建DESeqDataSet对象dds，用于存储原始计数数据countData_1、样本属性数据colData以及实验设计
+dds <- DESeqDataSetFromMatrix(countData = countData_1, 
+                              colData = colData, 
+                              design = ~condition)
+dds <- DESeq(dds)# 运行DESeq函数对dds对象进行差异表达分析，这里使用的是默认的Wald检验方法
+
+resultsNames(dds)# 打印dds对象中可以访问的结果集的名称
+results(dds, name = "condition_LowN_vs_highN")# 获取名为"condition_LowN_vs_highN"的特定对比结果集
+res <- results(dds, contrast = c("condition", "LowN", "highN"))# 使用contrast参数指定对比，这里比较的是LowN和highN两个条件的差异
+
+# 筛选差异基因，条件是log2对数变化倍数大于1（表达量至少相差2倍）且校正后的p值小于0.05
+res[which(res$log2FoldChange >= 1 & res$padj < 0.05), "sig"] <- "up"
+res[which(res$log2FoldChange <= -1 & res$padj < 0.05), "sig"] <- "down"
+res[which(abs(res$log2FoldChange) < 1 | res$padj >= 0.05), "sig"] <- "none"# 将不符合上述条件的基因标记为"none"
+
+# 筛选出标记为"up"或"down"的差异基因，并存储在新的数据框DEG中
+DEG <- res[which(res$sig != "none"), ]
+write.csv(DEG, file = "DEG.csv")# 将差异基因的数据框DEG导出为CSV文件，文件名为"DEG.csv"
+#数据质量及差异结果呈现---------------------------------------------------------------------
+# MA图用于展示基因表达量分布与差异基因分布
+resLFC <- lfcShrink(dds = dds, res = res, coef = "condition_LowN_vs_highN")# 使用lfcShrink函数对dds对象和res结果集进行差异倍数的收缩估计，coef参数指定了感兴趣的比较条件
+# 计算收缩后的log2对数变化倍数的最小值和最大值，忽略NA值
+minLFC <- min(resLFC$log2FoldChange, na.rm = TRUE)
+maxLFC <- max(resLFC$log2FoldChange, na.rm = TRUE)
+plotMA(resLFC, alpha = 0.05, ylim = c(minLFC - 1, maxLFC + 1)))# 绘制MA图，alpha参数设置显著性阈值，y轴根据计算出的变化倍数范围调整y轴的显示范围
+
+# 火山图用于展示差异倍数与p值之间的关系
+data <- as.data.frame(res)# 将res结果集转换为数据框
+# 使用ggplot2包创建火山图
+volcano_plot <- ggplot(data = data, mapping = aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
+  geom_point(size = 1, alpha = 1) +  # 添加散点图层，设置点的大小和透明度
+  scale_color_manual(values = c("red", "grey", "blue"), limits = c("up", "none", "down")) +  # 设置颜色映射
+  geom_vline(xintercept = c(-1, 1), lty = 3, col = "black", lwd = 0.5) +  # 添加水平线表示对数倍数变化的阈值
+  geom_hline(yintercept = -log10(0.05), lty = 3, col = "black", lwd = 0.5)  # 添加垂直线表示校正后的p值的阈值
+print(volcano_plot)# 打印火山图
+
+# 箱线散点图用于展示单个基因在不同条件下的表达量分布
+data <- plotCounts(dds, gene = "AGIS_Os01g058220", intgroup = "condition", returnData = TRUE)# 使用plotCounts函数生成特定基因的表达量数据，按条件分组
+
+# 使用ggplot2创建箱线散点图
+box_plot <- ggplot(data, aes(x = condition, y = count, fill = condition)) +
+  geom_jitter( size = 3, width = 0.2, shape = 21) +  # 添加抖动点图层以展示单个数据点
+  geom_boxplot()  # 添加箱线图表示数据的分布
+print(box_plot)
+
+# 差异热图用于展示差异基因的表达量热图
+vsd <- vst(dds, blind = FALSE)# 使用vst函数从dds对象生成一个标准化的表达量矩阵，blind=FALSE表示保留样本信息
+vsd_mat <- assay(vsd)# 提取标准化后的表达量矩阵
+deg <- rownames(DEG)# 获取差异基因的行名
+
+# 使用pheatmap包创建差异基因的热图，颜色渐变由绿色（低表达量）到黑色（中等表达量）再到红色（高表达量）
+# annotation参数用于添加样本的元数据，scale参数设置为"row"表示对行进行标准化
+heatmap <- pheatmap(vsd_mat[deg, ], color = colorRampPalette(c("green", "black", "red")(50)), 
+                     annotation = colData, scale = "row", cluster_cols = FALSE, show_rownames = FALSE)
+print(heatmap)
