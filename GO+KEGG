@@ -1,0 +1,163 @@
+library(enrichplot)
+library(clusterProfiler)
+library(ggplot2)
+library(dplyr)
+library(biomaRt)
+library(readxl)
+library(AnnotationHub)
+
+tran_geneid <- read_excel("AGIS2LOC2RAP.xlsx")# 从Excel文件读取转基因的基因ID信息
+diff_gene <- read.csv("DEG.csv")# 从CSV文件读取差异表达基因的数据
+colnames(diff_gene)[1] <- "gene"# 将diff_gene数据框的第一列重命名为"gene"
+
+# # 将差异表达基因与转基因的基因ID信息进行合并，通过"AGIS ID"和"gene"列进行匹配，保留所有的"gene"列的值
+RAP_ID <- merge(diff_gene, tran_geneid[, c("AGIS ID", "RAP ID")], 
+                by.x = "gene", by.y = "AGIS ID", all.x = TRUE)
+locus_ids <- RAP_ID$"RAP ID"# 从合并后的数据框中提取RAP ID
+
+listEnsembl()# 使用biomaRt包与Ensembl数据库进行交互，获取基因相关信息，列出所有可用的BioMart数据源
+ensembl <- useEnsembl(biomart = "genes")# 使用Ensembl的BioMart数据源
+listEnsemblGenomes()# 列出所有可用的基因组数据源
+ensembl_plants <- useEnsemblGenomes(biomart = "plants_mart")# 使用植物基因组的BioMart数据源
+searchDatasets(ensembl_plants, pattern = "Oryza sativa Japonica Group")# 在植物基因组数据源中搜索包含"Oryza sativa Japonica Group"的数据集
+ensembl_osativa <- useEnsemblGenomes(biomart = "plants_mart", dataset = "osativa_eg_gene")# 选择特定数据集进行查询，这里选择的是水稻基因组数据集
+
+# 从BioMart获取特定基因的Entrez ID等信息，attributes参数指定要检索的属性，filters参数指定要过滤的属性，values参数是过滤属性的值
+filter_list=as.data.frame(listFilters(ensembl))
+attri_list=as.data.frame(listAttributes(ensembl))
+# 使用ensembl_osativa数据源，根据locus_ids获取对应的Ensembl ID和Entrez ID等信息
+entrez_ids <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name", "description", "chromosome_name"), 
+                    filters = "ensembl_gene_id", 
+                    values = locus_ids, 
+                    mart = ensembl_osativa)
+entrez_ids <- entrez_ids[!is.na(entrez_ids$entrezgene_id), ]# 移除entrezgene_id列中包含NA值的行
+ENTREZID <- entrez_ids$entrezgene_id# 提取经过筛选后的Entrez ID
+
+#GO----------------------------------------------------------------------------------
+hub <- AnnotationHub()# 创建 AnnotationHub 数据库实例
+query(hub, "oryza sativa")# 在 AnnotationHub 数据库中搜索与 "oryza sativa"（水稻）相关的注释数据
+rice <- hub[['AH114587']]# 获取特定的水稻基因注释数据集，这里使用数据集的 ID 'AH114587'
+length(keys(rice))[1]# 获取 'rice' 注释数据集中的关键词列表的长度
+columns(rice)# 获取 'rice' 注释数据集的列（样本）信息
+
+# 使用 clusterProfiler 包进行基因本体（Gene Ontology, GO）富集分析
+# enrichGO 函数用于确定基因集中显著富集的 GO 术语
+GO <- enrichGO(gene = ENTREZID,  # 提供待富集的基因列表
+               OrgDb = rice,  # 指定包含基因与GO术语映射的物种特定注释数据包
+               keyType = 'ENTREZID',  # 指定输入的基因列表类型为ENTREZID
+               ont = 'ALL',  # 指定要分析的GO本体类型，'ALL'表示分析全部三种类型：BP（生物过程）、MF（分子功能）、CC（细胞组成）
+               pAdjustMethod = 'fdr',  # 指定用于校正p值的方法，这里是假发现率
+               pvalueCutoff = 0.05,  # 指定p值的阈值，小于该阈值的富集结果将被报告
+               qvalueCutoff = 0.05,  # 指定q值的阈值，小于该阈值的富集结果将被报告
+               readable = FALSE)  # 指定是否返回可读的描述信息，FALSE表示返回原始数据
+GO_res <- GO@result# 提取富集分析结果
+write.csv(GO_res, "GO_res.csv")# 将富集分析结果导出为 CSV 文件
+
+# 使用 dplyr 包对富集分析结果进行分组和排序，选择每个GO本体类型中 p.adjust 值最小的前5个结果
+GO_res_selected <- GO_res %>%
+  group_by(ONTOLOGY) %>%
+  slice_min(p.adjust, n = 5, with_ties = TRUE) %>%
+  ungroup()  # 移除分组信息，以便后续操作
+
+# 定义绘图主题，用于统一图表风格
+mytheme <- theme(
+  axis.title = element_text(face = "bold", size = 12, colour = "black"), # 设置坐标轴标题样式
+  axis.text = element_text(face = "bold", size = 12, colour = "black"), # 设置坐标轴标签样式
+  axis.line = element_line(colour = "black", linewidth = 1), # 设置轴线样式
+  panel.background = element_rect(color = "black"), # 设置绘图区边框样式
+  legend.key = element_blank() # 设置图例边框样式
+)
+
+# 使用 ggplot2 包绘制富集分析结果的条形图
+p1 <- ggplot(GO_res_selected, aes(x = Count, y = Description, fill = p.adjust)) +
+  geom_bar(stat = "identity", width = 0.5) +  # 添加条形图层，显示每个GO术语的基因计数
+  facet_grid(ONTOLOGY ~ ., scale = "free") +  # 添加分面，以ONTOLOGY为行，其他为列
+  scale_fill_gradient2(mid = "red", high = "blue") +  # 设置填充颜色渐变
+  mytheme +  # 应用自定义的绘图主题
+  labs(x = "Count", y = "")  # 设置坐标轴标签
+print(p1)
+
+# 计算基因比率，并将其添加到GO_res_selected数据框中
+GO_res_selected$GeneRatio <- sapply(strsplit(GO_res_selected$GeneRatio, "/"), function(x) {
+  numerator <- as.numeric(x[1])
+  denominator <- as.numeric(x[2])
+  return(numerator / denominator * 100)
+})
+# 使用 ggplot2 包绘制基因比率的散点图
+p2 <- ggplot(GO_res_selected, aes(x = GeneRatio, y = Description)) +
+  geom_point(aes(size = Count, color = p.adjust), alpha = 0.7) +  # 添加散点图层，根据Count调整点的大小，并根据p.adjust调整颜色
+  facet_grid(ONTOLOGY ~ ., scale = "free") +  # 添加分面
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 15)) +  # 设置x轴的范围和刻度
+  scale_size_continuous(range = c(1, 5)) +  # 设置点的大小范围
+  scale_color_gradient2(mid = "red", high = "blue") +  # 设置颜色渐变
+  labs(x = "GeneRatio", y = "")  # 设置坐标轴标签
+print(p2)
+
+#KEGG----------------------------------------------------------------------------------
+KEGG <- enrichKEGG(ENTREZID,  # 提供待富集的基因列表
+                   organism = "osa",  # 指定物种的缩写，这里 "osa" 对应水稻 Oryza sativa
+                   keyType = "kegg",  # 指定输入的基因列表类型为 kegg 通路 ID
+                   pAdjustMethod = "BH",  # 指定用于校正 p 值的方法，这里是 Benjamini-Hochberg
+                   pvalueCutoff = 0.05,  # 指定 p 值的阈值
+                   qvalueCutoff = 0.05)  # 指定 q 值的阈值
+KEGG_res <- KEGG@result# 提取 KEGG 富集分析结果
+write.csv(KEGG_res, "KEGG_res.csv")# 将 KEGG 富集分析结果导出为 CSV 文件
+
+# 清理 Description 列中的特定文本，以便更清晰地展示描述信息
+KEGG_Description <- gsub("\\s*- Oryza sativa japonica \\(Japanese rice\\) \\(RefSeq\\)\\s*", "", KEGG_res$Description)
+KEGG_res <- cbind(KEGG_res, KEGG_Description)# 将清理后的描述信息作为新列添加到 KEGG_res 数据框中
+
+KEGG_sorted <- KEGG_res %>% arrange(desc(Count)) %>% head(10)# 对富集分析结果按 Count 降序排列，并取前 10 个结果
+KEGG_sorted <- arrange(KEGG_sorted, KEGG_sorted$pvalue)# 对 KEGG_sorted 按 pvalue 升序排列
+
+# 计算 GeneRatio 列的值，并将其作为新的数值列添加到 KEGG_sorted 数据框中
+KEGG_sorted$GeneRatio <- sapply(strsplit(KEGG_sorted$GeneRatio, "/"), function(x) {
+  numerator <- as.numeric(x[1])
+  denominator <- as.numeric(x[2])
+  return(numerator / denominator * 100)
+})
+
+# 使用 ggplot2 创建一个按 GeneRatio 和 pvalue 着色的条形图
+p3 <- ggplot(KEGG_sorted, aes(x = GeneRatio, y = reorder(KEGG_Description, pvalue), fill = pvalue)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 30)) +
+  scale_fill_gradient2(mid = "blue", high = "red") +
+  labs(x = "Count", y = "") + mytheme
+print(p3)
+
+# 使用 ggplot2 创建一个散点图，其中点的大小按 Count 变化，颜色按 pvalue 变化
+p4 <- ggplot(KEGG_sorted, aes(x = GeneRatio, y = reorder(KEGG_Description, pvalue), fill = pvalue)) +
+  geom_point(aes(size = Count), alpha = 0.7) +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 30)) +
+  scale_size_continuous(range = c(1, 5)) +
+  scale_color_gradient2(mid = "blue", high = "red") +
+  labs(x = "GeneRatio", y = "KEGG_Description") + mytheme
+print(p4)
+
+# 获取基因符号与 Entrez ID 的映射关系
+gene_symbols <- getBM(attributes = c("entrezgene_id", "external_gene_name"), 
+                        filters = "entrezgene_id", 
+                        values = ENTREZID, 
+                        mart = ensembl_osativa)
+# 将 GO 富集分析结果中的 geneID 替换为对应的基因符号
+for (i in seq_len(nrow(GO_res))) {
+  gene_ids <- unlist(strsplit(GO_res$geneID[i], "/"))
+  symbols <- gene_symbols$external_gene_name[match(gene_ids, gene_symbols$entrezgene_id)]
+  GO_res$geneID[i] <- paste(symbols, collapse = "/")}
+# 更新 GO 对象中的结果集，以包含新的基因符号信息
+GO@result <- GO_res$geneID
+
+enrichplot::cnetplot(GO, showCategory = 3, circular = FALSE, colorEdge = TRUE)# 使用 enrichplot 包绘制基因-通路关联网络图
+enrichplot::cnetplot(KEGG, showCategory = 2, circular = FALSE, colorEdge = TRUE)# 对 KEGG 结果进行同样的网络图绘制
+
+# 使用 enrichplot 包绘制热图，展示富集分析结果的统计信息
+enrichplot::heatplot(KEGG, showCategory = 10)
+enrichplot::heatplot(GO, showCategory = 10)
+
+# 使用 pairwise_termsim 函数计算富集到的功能集/通路集之间的相似性（Jaccard 系数）
+GO2 <- pairwise_termsim(GO)
+KEGG2 <- pairwise_termsim(KEGG)
+
+# 使用 enrichplot 包绘制功能集/通路集之间的关联网络图
+enrichplot::emapplot(GO2, showCategory = 25, color = "p.adjust", layout = "kk")
+enrichplot::emapplot(KEGG2, showCategory = 25, color = "p.adjust", layout = "kk")
