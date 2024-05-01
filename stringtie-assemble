@@ -1,0 +1,29 @@
+# 对STAR结果的一系列的BAM文件按名称进行排序，结果保存为新的BAM文件
+for i in {10272602..10272607}; do
+    samtools sort -n ${i}_Aligned.sortedByCoord.out.bam -o ${i}_nameSorted.bam
+done
+# samtools sort命令用于对BAM文件进行排序，-n选项表示基于读的名字进行排序
+
+# 使用samtools merge命令将多个排序过的BAM文件合并为一个BAM文件，-@ 4指定了使用4个线程进行合并，可以加快处理速度
+samtools merge -@ 4 n15_merged.bam 10272602_nameSorted.bam 10272603_nameSorted.bam 10272604_nameSorted.bam
+samtools merge -@ 4 n19_merged.bam 10272605_nameSorted.bam 10272606_nameSorted.bam 10272607_nameSorted.bam
+
+# samtools sort命令再次对合并后的BAM文件进行排序，确保它们是有序的
+samtools sort -@ 4 n15_merged.bam -o n15_sorted.bam; samtools sort -@ 4 n19_merged.bam -o n19_sorted.bam
+# 确保BAM文件已经排序，然后为BAM文件建立索引，这允许快速随机访问
+samtools index -@ 4 n15_sorted.bam; samtools index -@ 4 n19_sorted.bam# 使用samtools index命令为BAM文件建立索引
+
+# 使用StringTie进行单样本转录本组装，估计表达量
+# -p 4指定了使用4个线程进行表达量估计，可以加快处理速度
+# -G指定了参考注释文件的路径，该文件包含基因的注释信息
+# -o指定了输出的转录本表达量估计文件的名称
+stringtie -p 4 -G ../00ref/NIP-T2T.gff3 -o n15_stringtie.gtf -e n15_sorted.bam
+stringtie -p 4 -G ../00ref/NIP-T2T.gff3 -o n19_stringtie.gtf -e n19_sorted.bam
+
+# 使用gffread工具从StringTie输出的GTF文件中提取转录本序列
+# -x选项后接的文件名是输出的转录本序列文件
+# -g选项后接的是参考基因组的FASTA文件路径
+gffread -x N15_cdna.fa -g ../00ref/NIP-T2T.fa n15_stringtie.gtf
+gffread -x N19_cdna.fa -g ../00ref/NIP-T2T.fa n19_stringtie.gtf
+# 这个命令用于提取多个样本的转录本序列到一个文件中
+gffread -x assembled_transcripts.fa -g reference_genome.fa StringTie_output.gtf
